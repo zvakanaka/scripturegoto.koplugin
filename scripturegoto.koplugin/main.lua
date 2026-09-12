@@ -337,7 +337,13 @@ end
 -- jumpToChapterVerse) before being accepted. Tune this per-EPUB if your
 -- Bible marks verses differently (e.g. with a leading pilcrow or
 -- superscript).
-local DEFAULT_VERSE_PATTERN = "[^0-9]%d+[^0-9]"
+-- Leading boundary uses a zero-width lookbehind rather than a consuming
+-- "[^0-9]" character class: crengine's regex engine has been observed to
+-- never match when a consuming character class is the very first token in
+-- the pattern (empirically confirmed - even a literal leading space before
+-- a known-present "16" failed to match), while the same class works fine
+-- as a trailing token, and a leading lookbehind assertion works fine too.
+local DEFAULT_VERSE_PATTERN = "(?<![0-9])%d+[^0-9]"
 
 function ScriptureGoto:getVersePattern()
     return G_reader_settings:readSetting("scripturegoto_verse_pattern") or DEFAULT_VERSE_PATTERN
@@ -362,14 +368,14 @@ function ScriptureGoto:getVersePatternCandidates(chapter, verse)
         table.insert(candidates, { search = custom_pattern:gsub("%%d%+", tostring(verse)) })
     else
         table.insert(candidates, {
-            search = "[^0-9]" .. verse .. "[^0-9]",
+            search = "(?<![0-9])" .. verse .. "[^0-9]",
             validate = function(node_text)
                 return node_text:match("^%s*" .. verse .. "%f[%D]") ~= nil
             end,
         })
     end
     table.insert(candidates, {
-        search = "[^0-9]" .. chapter .. ":" .. verse .. "[^0-9]",
+        search = "(?<![0-9])" .. chapter .. ":" .. verse .. "[^0-9]",
         validate = function(node_text)
             return node_text:match("^%s*" .. chapter .. ":" .. verse .. "%f[%D]") ~= nil
         end,
@@ -472,7 +478,7 @@ end
 -- worse outcome than a clear "couldn't find" error, since a reader might
 -- not immediately notice they're in the wrong book.
 function ScriptureGoto:findChapterStartXPointer(ui, chapter, upper_bound_entry)
-    local pattern = "[^0-9]" .. chapter .. ":1[^0-9]"
+    local pattern = "(?<![0-9])" .. chapter .. ":1[^0-9]"
     local ok, results = pcall(function()
         return ui.document:findText(pattern, 0, 0, false, ui.view.state.page, true, 20, 0)
     end)

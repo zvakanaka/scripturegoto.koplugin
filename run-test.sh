@@ -4,6 +4,7 @@
 # and manually testing scripturegoto.koplugin.
 #
 # Usage: ./run-test.sh [path-to-book-to-open]
+# See test-books/README.md for the full dev environment and test fixtures.
 set -e
 cd "$(dirname "$0")"
 export KO_HOME="$PWD/vendor/koreader-home"
