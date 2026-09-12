@@ -18,14 +18,21 @@ Both work for a single verse, a verse range or list ("Alma 40:11-14",
 "Isa. 24:21, 22"), a whole chapter, or a chapter range ("Ecclesiastes
 3-4").
 
-<p>
-  <img src="docs/demo-jump.gif" alt="Tapping a scripture link and jumping to it in an EPUB" width="45%">
-  <img src="docs/demo-preview.gif" alt="Previewing a scripture link's text in a floating window" width="45%">
-</p>
-<p>
-  <img src="docs/demo-highlight-jump.gif" alt="Highlighting a plain-text scripture reference and jumping to it in an EPUB" width="45%">
-  <img src="docs/demo-highlight-preview.gif" alt="Highlighting a plain-text scripture reference and previewing its text in a floating window" width="45%">
-</p>
+**Go to scripture**, from a link:
+
+![Tapping a scripture link and jumping to it in an EPUB](docs/demo-jump.gif)
+
+**Preview scripture**, from a link:
+
+![Previewing a scripture link's text in a floating window](docs/demo-preview.gif)
+
+**Go to scripture**, from highlighted text:
+
+![Highlighting a plain-text scripture reference and jumping to it in an EPUB](docs/demo-highlight-jump.gif)
+
+**Preview scripture**, from highlighted text:
+
+![Highlighting a plain-text scripture reference and previewing its text in a floating window](docs/demo-highlight-preview.gif)
 
 ## Supported links
 
