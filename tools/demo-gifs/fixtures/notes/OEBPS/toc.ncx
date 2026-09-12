@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
+  <head><meta name="dtb:uid" content="urn:demo:study-notes"/></head>
+  <docTitle><text>Study Notes</text></docTitle>
+  <navMap>
+    <navPoint id="np1" playOrder="1">
+      <navLabel><text>Notes</text></navLabel>
+      <content src="chap1.xhtml"/>
+    </navPoint>
+  </navMap>
+</ncx>

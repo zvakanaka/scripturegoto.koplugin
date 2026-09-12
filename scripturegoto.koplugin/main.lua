@@ -97,6 +97,23 @@ function ScriptureGoto:init()
     self:addHighlightDialogButton()
     self:addExternalLinkPreviewButton()
     self:addHighlightPreviewButton()
+
+    -- Dev-only hook for tools/demo-gifs (see its README): completely inert
+    -- unless SCRIPTUREGOTO_DEMO_HOOK is set (by that tool) to a Lua file
+    -- path, which is then run with this plugin instance as an argument.
+    -- Never set by the plugin itself, so this is a no-op for real users.
+    local demo_hook_path = os.getenv("SCRIPTUREGOTO_DEMO_HOOK")
+    if demo_hook_path then
+        local chunk, load_err = loadfile(demo_hook_path)
+        if chunk then
+            local ok, err = pcall(chunk, self)
+            if not ok then
+                logger.warn("ScriptureGoto: demo hook errored:", err)
+            end
+        else
+            logger.warn("ScriptureGoto: demo hook failed to load:", load_err)
+        end
+    end
 end
 
 -- Add a "Go to scripture" button to ReaderLink's external-link dialog (the
