@@ -6,7 +6,7 @@ links or highlighted text.
 ## Features
 
 - **Go to scripture** — tap a supported scripture link, or highlight a
-  plain-text reference (e.g. "Alma 40:11-14"), then jump straight to the
+  plain-text reference (e.g. "Isaiah 53:5"), then jump straight to the
   matching chapter/verse in a scripture EPUB you configure per volume.
 - **Preview scripture** — same triggers, but shows the verse(s) or whole
   chapter(s) in a floating window instead, no EPUB required. Text is
