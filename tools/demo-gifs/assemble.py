@@ -8,6 +8,7 @@ all four modes.
 """
 import json
 import os
+import shutil
 import subprocess
 import sys
 
@@ -25,8 +26,11 @@ RADIUS = 34
 CROP_H = {"jump": 830, "preview": 830, "hjump": 860, "hpreview": 860}
 
 # Each mode's frame sequence: (frame_index, hold_seconds) for a plain
-# frame, or ("touch", frame_index, coord_key, hold_seconds) to overlay a
-# tap indicator at coords[coord_key] on top of that frame first.
+# frame; ("touch", frame_index, coord_key, hold_seconds) to overlay a
+# static tap indicator at coords[coord_key] on top of that frame; or
+# ("swipe", frame_index, start_key, end_key, total_seconds, n_steps) to
+# overlay the indicator sliding from coords[start_key] to coords[end_key]
+# across n_steps frames (for a highlight/select drag, rather than a tap).
 SEQUENCES = {
     "jump": [
         (0, 1.0),
@@ -48,14 +52,14 @@ SEQUENCES = {
     ],
     "hjump": [
         (0, 1.0),
-        ("touch", 0, "phrase", 0.45),
+        ("swipe", 0, "phrase_left", "phrase_right", 0.7, 7),
         (1, 1.0),
         ("touch", 1, "dialog_button", 0.45),
         (2, 2.0),
     ],
     "hpreview": [
         (0, 1.0),
-        ("touch", 0, "phrase", 0.45),
+        ("swipe", 0, "phrase_left", "phrase_right", 0.7, 7),
         (1, 1.0),
         ("touch", 1, "dialog_button", 0.45),
         (2, 2.0),
@@ -89,6 +93,42 @@ def crop(img, h):
     return img.crop((0, 0, w, h))
 
 
+def _missing(mode, key):
+    print(f"warning: no recorded coordinate for {mode!r} stage {key!r}; "
+          f"showing the frame without a tap indicator", file=sys.stderr)
+
+
+def _expand(mode, spec, coords, load):
+    """Expands one SEQUENCES entry into a list of (image, duration)."""
+    kind = spec[0]
+    if kind == "touch":
+        _, idx, key, dur = spec
+        xy = coords.get(key)
+        img = load(idx)
+        if xy:
+            img = add_touch(img, (xy["x"], xy["y"]))
+        else:
+            _missing(mode, key)
+        return [(img, dur)]
+    if kind == "swipe":
+        _, idx, start_key, end_key, dur, steps = spec
+        p0, p1 = coords.get(start_key), coords.get(end_key)
+        base = load(idx)
+        if not (p0 and p1):
+            _missing(mode, f"{start_key}/{end_key}")
+            return [(base, dur)]
+        step_dur = dur / steps
+        frames = []
+        for i in range(steps):
+            t = i / (steps - 1) if steps > 1 else 1.0
+            x = p0["x"] + (p1["x"] - p0["x"]) * t
+            y = p0["y"] + (p1["y"] - p0["y"]) * t
+            frames.append((add_touch(base, (x, y)), step_dur))
+        return frames
+    idx, dur = spec
+    return [(load(idx), dur)]
+
+
 def build(mode, build_dir, out_dir):
     with open(os.path.join(build_dir, f"{mode}_coords.json")) as f:
         coords = json.load(f)
@@ -102,27 +142,22 @@ def build(mode, build_dir, out_dir):
 
     h = CROP_H[mode]
     seq_dir = os.path.join(build_dir, f"{mode}_seq")
-    os.makedirs(seq_dir, exist_ok=True)
+    if os.path.isdir(seq_dir):
+        shutil.rmtree(seq_dir)
+    os.makedirs(seq_dir)
+
+    flat = []
+    for spec in SEQUENCES[mode]:
+        flat.extend(_expand(mode, spec, coords, load))
 
     inputs = []
-    for n, spec in enumerate(SEQUENCES[mode]):
-        if spec[0] == "touch":
-            _, idx, key, dur = spec
-            xy = coords.get(key)
-            img = load(idx)
-            img = add_touch(img, (xy["x"], xy["y"])) if xy else img
-            if not xy:
-                print(f"warning: no recorded coordinate for {mode!r} stage {key!r}; "
-                      f"showing the frame without a tap indicator", file=sys.stderr)
-        else:
-            idx, dur = spec
-            img = load(idx)
+    for n, (img, dur) in enumerate(flat):
         img = crop(img, h)
         path = os.path.join(seq_dir, f"{n}.png")
         img.save(path)
         inputs += ["-loop", "1", "-t", str(dur), "-i", path]
 
-    n = len(SEQUENCES[mode])
+    n = len(flat)
     filter_complex = (
         "".join(f"[{i}:v]" for i in range(n))
         + f"concat=n={n}:v=1:a=0,split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=bayer"

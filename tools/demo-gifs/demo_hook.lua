@@ -87,19 +87,28 @@ local function saveCoords(coords)
     f:close()
 end
 
--- Finds a box's center on screen for a run of visible text, by searching
--- for it and asking crengine for the screen boxes of the match - this is
--- exactly how a real search-result highlight is positioned (see
--- readersearch.lua's use of getTextFromXPointers(start, "end", true)),
--- just without actually drawing a selection.
-local function findTextCenter(ui, text)
+-- Finds a screen-space box for a run of visible text, by searching for it
+-- and asking crengine for the screen boxes of the match - this is exactly
+-- how a real search-result highlight is positioned (see readersearch.lua's
+-- use of getTextFromXPointers(start, "end", true)), just without actually
+-- drawing a selection.
+local function findTextBox(ui, text)
     local results = ui.document:findText(text, 0, 0, false, ui.view.state.page, false, 5, 0)
     local hit = results and results[1]
     if not hit then return nil end
     local boxes = ui.document:getScreenBoxesFromPositions(hit.start, hit["end"], true)
     if not boxes or #boxes == 0 then return nil end
     local box = boxes[1]
-    return { x = (box.x + box.w / 2) * SCALE, y = (box.y + box.h / 2) * SCALE }, hit
+    return {
+        left = { x = box.x * SCALE, y = (box.y + box.h / 2) * SCALE },
+        right = { x = (box.x + box.w) * SCALE, y = (box.y + box.h / 2) * SCALE },
+        center = { x = (box.x + box.w / 2) * SCALE, y = (box.y + box.h / 2) * SCALE },
+    }, hit
+end
+
+local function findTextCenter(ui, text)
+    local box, hit = findTextBox(ui, text)
+    return box and box.center, hit
 end
 
 -- Finds a ButtonDialog's button widget by its exact label, by walking the
@@ -223,7 +232,7 @@ elseif demo == "hjump" or demo == "hpreview" then
         -- physical screen coordinates, which would have to match whatever
         -- window size this particular run's window manager assigns.
         local h = self.ui.highlight
-        local center, hit = findTextCenter(self.ui, phrase)
+        local box, hit = findTextBox(self.ui, phrase)
         if hit then
             self.ui.document:getTextFromXPointers(hit.start, hit["end"], true)
             h.selected_text = {
@@ -238,7 +247,11 @@ elseif demo == "hjump" or demo == "hpreview" then
             local dialog = h.highlight_dialog
             local button = dialog and findDialogButton(dialog, button_label)
             saveCoords({
-                phrase = center,
+                -- Left/right edges (not just a center point) so the GIF can
+                -- animate the tap indicator sliding across the phrase, like
+                -- the drag of a real select-and-hold gesture.
+                phrase_left = box and box.left,
+                phrase_right = box and box.right,
                 dialog_button = dimenCenter(button and button.dimen),
             })
             touch(dir .. "/ready1")
