@@ -16,8 +16,10 @@ Redownload the AppImage if `vendor/squashfs-root` is missing or you want
 to update KOReader:
 
 ```sh
-curl -sL -o vendor/koreader-x86_64.AppImage \
-  https://github.com/koreader/koreader/releases/latest/download/koreader-x86_64.AppImage
+# release assets are versioned (koreader-vYYYY.MM.N-x86_64.AppImage)
+url=$(curl -s https://api.github.com/repos/koreader/koreader/releases/latest \
+  | grep -o '"browser_download_url": *"[^"]*x86_64[^"]*AppImage"' | cut -d'"' -f4)
+curl -sL -o vendor/koreader-x86_64.AppImage "$url"
 chmod +x vendor/koreader-x86_64.AppImage
 (cd vendor && ./koreader-x86_64.AppImage --appimage-extract)
 ln -sf ../../../../../../scripturegoto.koplugin \
@@ -37,7 +39,7 @@ KOReader config) and launches the emulator. Plugin edits under
 step, it's just Lua.
 
 After a fresh checkout, set each scripture volume's EPUB path once via
-More tools → **Scripture Goto** in the app, or by editing
+More tools → **Scripture Goto** → **Scripture EPUBs** in the app, or by editing
 `vendor/koreader-home/settings.reader.lua`'s `scripturegoto_volume_epubs`
 table directly.
 
@@ -76,6 +78,11 @@ table directly.
    `KO_HOME`), then opens a floating window. From a selection it pops up
    next to the selected text (smaller); from a link tap it's centered and
    larger.
-5. More tools → **Scripture Goto** also lets you set each volume's EPUB,
-   open a test link via a paste-a-URL dialog, and view **About Scripture
+5. Search tab (magnifier) → **Search scriptures…**: "ne37" lists
+   1-3 Nephi 3:7, 4 Nephi 1:37 and Nehemiah 3:7; "jn316" → John 3:16
+   lands in `test-bible.epub` with the whole verse tinted.
+   A word query ("ask seek knock") downloads all five volumes if needed,
+   builds the index once, and lists matching verses with the words bold.
+6. More tools → **Scripture Goto** also lets you set each volume's EPUB,
+   open a test link via a paste-a-URL dialog (shown only when `SCRIPTUREGOTO_DEV` is set, which `run-test.sh` does), and view **About Scripture
    Goto…** (credits the text data source).
