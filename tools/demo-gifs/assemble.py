@@ -12,16 +12,19 @@ import shutil
 import subprocess
 import sys
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageChops, ImageDraw
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
 
 RADIUS = 34
 
-# Crop height (of the 720-wide capture): the menus and results lists use
-# most of the screen, so keep it all but the blank strip at the very bottom.
-CROP_H = 900
+# Each GIF is cropped to where something is drawn: the frames are the full
+# screen, whose bottom part is blank (below the progress bar). MARGIN is the
+# white space kept under the lowest drawn pixel across all of a mode's
+# frames.
+MARGIN = 14
+INK = 20  # a pixel this far from white counts as drawn
 
 # Seconds each frame is held before the tap indicator shows on it, and for
 # the tap itself. Frames that show a result (a landing, a preview) are held
@@ -81,6 +84,19 @@ def add_touch(img, xy):
     return Image.alpha_composite(img, overlay).convert("RGB")
 
 
+def content_height(frames):
+    """The height that keeps everything drawn in any of `frames` (PIL
+    images), plus MARGIN, rounded up to even for the video encoder."""
+    lowest = 0
+    for img in frames:
+        ink = ImageChops.invert(img.convert("L")).point(lambda p: 255 if p > INK else 0)
+        box = ink.getbbox()
+        if box:
+            lowest = max(lowest, box[3])
+    h = min(lowest + MARGIN, frames[0].height)
+    return h + (h % 2)
+
+
 def crop(img, h):
     w, _ = img.size
     return img.crop((0, 0, w, h))
@@ -133,9 +149,10 @@ def build(mode, build_dir, out_dir):
     for idx, hold, key in sequence(mode):
         flat.extend(_expand(mode, idx, hold, key, coords, load))
 
+    crop_h = content_height([load(i) for i, _hold, _key in sequence(mode)])
     inputs = []
     for n, (img, dur) in enumerate(flat):
-        img = crop(img, CROP_H)
+        img = crop(img, crop_h)
         path = os.path.join(seq_dir, f"{n}.png")
         img.save(path)
         inputs += ["-loop", "1", "-t", str(dur), "-i", path]
