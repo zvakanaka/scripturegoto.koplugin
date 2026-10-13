@@ -8,5 +8,7 @@
 set -e
 cd "$(dirname "$0")"
 export KO_HOME="$PWD/vendor/koreader-home"
+# Shows the plugin menu's development-only "Open test link…" item.
+export SCRIPTUREGOTO_DEV=1
 mkdir -p "$KO_HOME"
 exec ./vendor/squashfs-root/usr/lib/koreader/koreader.sh "${1:-$PWD/test-books/source-book.epub}"

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Regenerates all four docs/demo-*.gif files by driving a real (emulated)
+# Regenerates every docs/demo-*.gif file by driving a real (emulated)
 # koreader through each usage flow and recording it. See README.md in this
 # directory for how it works and its prerequisites.
 set -e
@@ -20,10 +20,13 @@ fi
 
 CACHE_DIR="$VOLUME_EPUBS_HOME/scripturegoto"
 mkdir -p "$CACHE_DIR"
-for pair in "nt:new-testament-flat.json" "bofm:book-of-mormon-flat.json"; do
+# All five volumes: the preview GIFs need nt and bofm, the word-search GIF
+# builds its index from every volume.
+for pair in "ot:old-testament-flat.json" "nt:new-testament-flat.json" "bofm:book-of-mormon-flat.json" \
+            "dc-testament:doctrine-and-covenants-flat.json" "pgp:pearl-of-great-price-flat.json"; do
     file="${pair#*:}"
     if [ ! -f "$CACHE_DIR/$file" ]; then
-        echo "Downloading $file (one-time, for the preview GIFs)..."
+        echo "Downloading $file (one-time)..."
         curl -fsSL "https://raw.githubusercontent.com/bcbooks/scriptures-json/master/flat/$file" \
             -o "$CACHE_DIR/$file"
     fi
@@ -33,7 +36,7 @@ python3 build_demo_epub.py
 
 pkill -9 -f "squashfs-root.*koreader" 2>/dev/null || true
 
-for mode in jump preview hjump hpreview; do
+for mode in $(python3 -c "import json;print(*json.load(open(\"modes.json\")))"); do
     echo "Recording $mode..."
     python3 record.py "$mode" "$PWD/build" "$PWD/build/demo.epub"
 done

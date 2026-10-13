@@ -4,9 +4,10 @@ screenshots each stage. Returns the frame paths and any tap-indicator
 coordinates the hook recorded (see demo_hook.lua) - assemble.py turns those
 into the final GIFs.
 
-Modes: "jump", "preview" (5 stages: notes page, dialog, landed/previewed,
-menu, back at notes - jump only has the extra menu/back stages) and
-"hjump", "hpreview" (3 stages: notes page, highlight menu, landed/previewed).
+Each stage's picture is koreader's own framebuffer, saved by the hook
+(Screen:shot) - see demo_hook.lua. The steps of each mode are in modes.json; each one is a real tap, so a
+recording walks the whole path (menu, dialogs, results, landing, and back to
+the original book where it makes sense), one frame per step.
 """
 import json
 import os
@@ -19,11 +20,12 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, HERE)
-from capture import find_window, capture, destroy_stale_windows
+from capture import load_shot
 
 CONTENT_W, CONTENT_H = 720, 972
 
-STAGE_COUNT = {"jump": 5, "preview": 3, "hjump": 3, "hpreview": 3}
+with open(os.path.join(HERE, "modes.json")) as _f:
+    MODES = json.load(_f)
 
 
 def _wait_for(path, timeout=20):
@@ -35,19 +37,6 @@ def _wait_for(path, timeout=20):
     raise RuntimeError(f"timed out waiting for {path}")
 
 
-def _wait_for_window(timeout=10):
-    start = time.time()
-    while time.time() - start < timeout:
-        try:
-            w = find_window()
-            if w:
-                return w
-        except Exception:
-            pass
-        time.sleep(0.1)
-    raise RuntimeError("window not found in time")
-
-
 def _kill_group(proc):
     try:
         os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
@@ -55,18 +44,17 @@ def _kill_group(proc):
         pass
 
 
-def record(mode, out_dir, book, settle=2.5):
+def record(mode, out_dir, book):
     """Runs one demo mode. Returns (frame_paths, coords) where coords is the
     dict written by demo_hook.lua (tap-indicator target -> {"x":, "y":})."""
-    n_stages = STAGE_COUNT[mode]
+    n_stages = len(MODES[mode]["steps"]) + 1
     demo_dir = tempfile.mkdtemp(prefix="scripturegoto-demo-")
     log_path = os.path.join(out_dir, f"record_{mode}.log")
-
-    destroy_stale_windows()
 
     env = os.environ.copy()
     env["SCRIPTUREGOTO_DEMO"] = mode
     env["SCRIPTUREGOTO_DEMO_DIR"] = demo_dir
+    env["SCRIPTUREGOTO_DEMO_PLAN"] = os.path.join(HERE, "modes.json")
     env["SCRIPTUREGOTO_DEMO_HOOK"] = os.path.join(HERE, "demo_hook.lua")
     env["SCRIPTUREGOTO_DEMO_CONTENT_W"] = str(CONTENT_W)
     env["KO_HOME"] = os.path.join(REPO, "vendor", "koreader-home")
@@ -78,21 +66,17 @@ def record(mode, out_dir, book, settle=2.5):
         start_new_session=True,
     )
     try:
-        _wait_for_window()
-
         frames = []
         _wait_for(os.path.join(demo_dir, "ready0"))
-        time.sleep(settle)
         f0 = os.path.join(out_dir, f"{mode}_f0.png")
-        capture(f0, CONTENT_W, CONTENT_H)
+        load_shot(os.path.join(demo_dir, "shot0.png"), f0, CONTENT_W, CONTENT_H)
         frames.append(f0)
 
         for i in range(1, n_stages):
             open(os.path.join(demo_dir, f"go{i}"), "w").close()
             _wait_for(os.path.join(demo_dir, f"ready{i}"))
-            time.sleep(settle)
             fi = os.path.join(out_dir, f"{mode}_f{i}.png")
-            capture(fi, CONTENT_W, CONTENT_H)
+            load_shot(os.path.join(demo_dir, f"shot{i}.png"), fi, CONTENT_W, CONTENT_H)
             frames.append(fi)
 
         coords = {}

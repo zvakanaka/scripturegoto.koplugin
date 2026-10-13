@@ -1,0 +1,75 @@
+{
+  "jump": {
+    "steps": [
+      "link",
+      "button:Go to scripture",
+      "menu_top:main",
+      "item:Open previous document"
+    ]
+  },
+  "preview": {
+    "steps": [
+      "link",
+      "button:Preview scripture",
+      "button:Close"
+    ]
+  },
+  "hjump": {
+    "steps": [
+      "select",
+      "button:Go to scripture",
+      "menu_top:main",
+      "item:Open previous document"
+    ]
+  },
+  "hpreview": {
+    "steps": [
+      "select",
+      "button:Preview scripture",
+      "button:Close"
+    ]
+  },
+  "shortcut": {
+    "query": "ne37",
+    "pick": "2 Nephi 3:7",
+    "steps": [
+      "menu_top",
+      "tab:search",
+      "item:Search scriptures…",
+      "type",
+      "button:Search",
+      "result",
+      "menu_top:main",
+      "item:Open previous document"
+    ]
+  },
+  "range": {
+    "query": "alma 32:21-22",
+    "pick": "Alma 32:21-22",
+    "steps": [
+      "menu_top",
+      "tab:search",
+      "item:Search scriptures…",
+      "type",
+      "button:Search",
+      "result",
+      "menu_top:main",
+      "item:Open previous document"
+    ]
+  },
+  "words": {
+    "query": "ask seek knock",
+    "pick": "Luke 11:9",
+    "build_index": true,
+    "steps": [
+      "menu_top",
+      "tab:search",
+      "item:Search scriptures…",
+      "type",
+      "button:Search",
+      "result",
+      "menu_top:main",
+      "item:Open previous document"
+    ]
+  }
+}

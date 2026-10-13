@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Builds build/demo.epub (the "Gospel Study Guide" notes book used by all
-four GIF recordings) from fixtures/notes/. Run standalone, or via run.sh."""
+GIF recordings) from fixtures/notes/. Run standalone, or via run.sh."""
 import os
 import zipfile
 
