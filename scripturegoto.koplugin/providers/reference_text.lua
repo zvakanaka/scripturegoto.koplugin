@@ -35,7 +35,7 @@ local ALIASES = {
     dan = "Daniel", obad = "Obadiah", hab = "Habakkuk", zeph = "Zephaniah",
     hag = "Haggai", zech = "Zechariah", mal = "Malachi",
     -- New Testament
-    matt = "Matthew", rom = "Romans",
+    matt = "Matthew", jn = "John", rom = "Romans",
     ["1 cor"] = "1 Corinthians", ["2 cor"] = "2 Corinthians",
     gal = "Galatians", eph = "Ephesians", phil = "Philippians", philip = "Philippians",
     col = "Colossians",
@@ -166,4 +166,6 @@ end
 return {
     id = "reference_text",
     parse = parseReference,
+    -- Also used by shortcut_reference.lua as extra abbreviations.
+    ALIASES = ALIASES,
 }

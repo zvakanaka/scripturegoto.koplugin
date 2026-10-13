@@ -55,6 +55,25 @@ local loaded_chapter_verses = {}
 
 local ScriptureData = {}
 
+-- Every volume key, in canonical order.
+ScriptureData.VOLUMES = { "ot", "nt", "bofm", "dc-testament", "pgp" }
+
+function ScriptureData:getCacheDir()
+    return CACHE_DIR
+end
+
+-- Maps a book name as this dataset's "reference" strings spell it (e.g.
+-- "D&C", "Solomon's Song") back to our book_data.lua canonical name.
+function ScriptureData:canonicalBookName(volume, dataset_book)
+    local info = VOLUME_INFO[volume]
+    if info and info.book_name_overrides then
+        for canonical, name in pairs(info.book_name_overrides) do
+            if name == dataset_book then return canonical end
+        end
+    end
+    return dataset_book
+end
+
 function ScriptureData:getCachePath(volume)
     local info = VOLUME_INFO[volume]
     if not info then return nil end
@@ -165,7 +184,9 @@ end
 -- list - order and gaps are respected as given), each line prefixed with
 -- its full "Book Chapter:Verse" reference, or (nil, err) if the volume
 -- isn't cached yet or none of the requested verses are found in this
--- dataset.
+-- dataset. Also returns, third, the verses found in that order as
+-- { {chapter=, verse=, label="Book C:V", text=}, ... }, for callers that
+-- lay the text out themselves.
 function ScriptureData:getVerseText(volume, book, chapter, verses)
     if not self:isCached(volume) then
         return nil, "not_cached"
@@ -178,24 +199,26 @@ function ScriptureData:getVerseText(volume, book, chapter, verses)
     local lookup_book = (info.book_name_overrides and info.book_name_overrides[book]) or book
     local index = loaded_indexes[volume]
 
-    local parts = {}
+    local parts, found = {}, {}
     for _, v in ipairs(verses) do
         local text = index[lookup_book .. "|" .. chapter .. "|" .. v]
         if text then
-            table.insert(parts, book .. " " .. chapter .. ":" .. v .. " " .. text)
+            local label = book .. " " .. chapter .. ":" .. v
+            table.insert(parts, label .. " " .. text)
+            table.insert(found, { chapter = chapter, verse = v, label = label, text = text })
         end
     end
 
     if #parts == 0 then
         return nil, "verse_not_found"
     end
-    return table.concat(parts, "\n\n")
+    return table.concat(parts, "\n\n"), nil, found
 end
 
 -- Returns (text, nil) for every verse of every chapter number in `chapters`
 -- (a plain array, e.g. {3} or {3,4} for a chapter range), each line
 -- prefixed with its full "Book Chapter:Verse" reference, or (nil, err) as
--- with getVerseText.
+-- with getVerseText (which see for the third return value).
 function ScriptureData:getChapterText(volume, book, chapters)
     if not self:isCached(volume) then
         return nil, "not_cached"
@@ -209,14 +232,16 @@ function ScriptureData:getChapterText(volume, book, chapters)
     local index = loaded_indexes[volume]
     local chapter_verses = loaded_chapter_verses[volume]
 
-    local parts = {}
+    local parts, found = {}, {}
     for _, chapter in ipairs(chapters) do
         local verses = chapter_verses[lookup_book .. "|" .. chapter]
         if verses then
             for _, v in ipairs(verses) do
                 local text = index[lookup_book .. "|" .. chapter .. "|" .. v]
                 if text then
-                    table.insert(parts, book .. " " .. chapter .. ":" .. v .. " " .. text)
+                    local label = book .. " " .. chapter .. ":" .. v
+                    table.insert(parts, label .. " " .. text)
+                    table.insert(found, { chapter = chapter, verse = v, label = label, text = text })
                 end
             end
         end
@@ -225,7 +250,7 @@ function ScriptureData:getChapterText(volume, book, chapters)
     if #parts == 0 then
         return nil, "chapter_not_found"
     end
-    return table.concat(parts, "\n\n")
+    return table.concat(parts, "\n\n"), nil, found
 end
 
 return ScriptureData

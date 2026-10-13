@@ -14,18 +14,34 @@ the verse text (downloaded on first use from bcbooks/scriptures-json, see
 scripture_data.lua) in a floating window instead of jumping to it - no
 EPUB needs to be configured for that to work.
 
+And a "Search scriptures" dialog (Search tab of the menu, or a gesture): a query
+with a number in it offers Gospel Library-style reference shortcuts ("ne37"
+-> 1 Nephi 3:7, see shortcut_reference.lua), anything else is a full-text
+word search over all five volumes (see search_index.lua).
+
+Landing on a verse (from any of these) tints the whole verse or verse
+range, not just its number, for as long as the book stays open.
+
 @module koplugin.ScriptureGoto
 ]]--
 
 local ConfirmBox = require("ui/widget/confirmbox")
 local Device = require("device")
+local InputText = require("ui/widget/inputtext")
 local Dispatcher = require("dispatcher")
 local Event = require("ui/event")
+local Geom = require("ui/geometry")
+local GestureRange = require("ui/gesturerange")
 local InfoMessage = require("ui/widget/infomessage")
+local InputContainer = require("ui/widget/container/inputcontainer")
 local InputDialog = require("ui/widget/inputdialog")
 local PathChooser = require("ui/widget/pathchooser")
+local Menu = require("ui/widget/menu")
+local NetworkMgr = require("ui/network/manager")
 local Size = require("ui/size")
+local TextBoxWidget = require("ui/widget/textboxwidget")
 local TextViewer = require("ui/widget/textviewer")
+local Trapper = require("ui/trapper")
 local UIManager = require("ui/uimanager")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local lfs = require("libs/libkoreader-lfs")
@@ -39,6 +55,9 @@ local Screen = Device.screen
 -- up verse text from them for the "Preview scripture" floating window -
 -- independent of the per-volume EPUBs the "Go to scripture" jump uses.
 local ScriptureData = require("scripture_data")
+
+-- Book names <-> churchofjesuschrist.org URL slugs, for linking previews.
+local BOOK_DATA = require("book_data")
 
 -- Each provider recognizes one site's scripture-link URL format and, if it
 -- matches, resolves it to a {volume, book, chapter, verse} table. `volume`
@@ -56,6 +75,16 @@ local PROVIDERS = {
 -- Recognizes a plain-text scripture reference (not a hyperlink) inside
 -- selected/highlighted text, e.g. "Alma 40:11-14" or "Isa. 24:21, 22".
 local ReferenceText = require("providers.reference_text")
+
+-- "Search scriptures": Gospel Library-style shortcuts like "ne37", and a
+-- full-text word index built once from the downloaded scripture text.
+local ShortcutReference = require("shortcut_reference")
+local SearchIndex = require("search_index")
+
+-- Full-text search shows at most this many verses (the rest are counted).
+local MAX_SEARCH_RESULTS = 500
+-- Most candidate hits to check when looking for a verse marker in a chapter.
+local MAX_VERSE_HITS = 300
 
 -- Try each provider in turn and return the first match, tagged with which
 -- provider recognized it.
@@ -88,15 +117,47 @@ function ScriptureGoto:onDispatcherRegisterActions()
     Dispatcher:registerAction("scripturegoto_test_link", {
         category = "none", event = "ScriptureGotoTestLink", title = _("Scripture Goto: open test link"), general = true,
     })
+    Dispatcher:registerAction("scripturegoto_search", {
+        category = "none", event = "ScriptureGotoSearch", title = _("Scripture Goto: search scriptures"), general = true,
+    })
+end
+
+-- Plugin menu items that name a tab with a sorting_hint are appended after
+-- the built-in ones, which here would leave Search scriptures on the Search
+-- tab's second page. KOReader's menu order tables are plain lists, so put
+-- the item at the top of that tab's first page instead (once per run).
+local function placeSearchMenuItem()
+    for _i, module in ipairs{ "ui/elements/reader_menu_order", "ui/elements/filemanager_menu_order" } do
+        local ok, order = pcall(require, module)
+        local list = ok and order.search
+        if list then
+            local already, at = false, nil
+            for i, key in ipairs(list) do
+                if key == "scripturegoto_search" then already = true end
+                if key == "dictionary_lookup" and not at then at = i end
+            end
+            if not already and at then
+                table.insert(list, at, "----------------------------")
+                table.insert(list, at, "scripturegoto_search")
+            end
+        end
+    end
 end
 
 function ScriptureGoto:init()
+    placeSearchMenuItem()
     self:onDispatcherRegisterActions()
     self.ui.menu:registerToMainMenu(self)
-    self:addExternalLinkDialogButton()
-    self:addHighlightDialogButton()
-    self:addExternalLinkPreviewButton()
-    self:addHighlightPreviewButton()
+    -- The link/selection buttons only exist in the reader; the menu (and
+    -- its search) also works from the file browser.
+    if self.ui.link then
+        self:addExternalLinkDialogButton()
+        self:addExternalLinkPreviewButton()
+    end
+    if self.ui.highlight then
+        self:addHighlightDialogButton()
+        self:addHighlightPreviewButton()
+    end
 
     -- Dev-only hook for tools/demo-gifs (see its README): completely inert
     -- unless SCRIPTUREGOTO_DEMO_HOOK is set (by that tool) to a Lua file
@@ -225,6 +286,120 @@ local function formatRangeLabel(numbers)
     return table.concat(parts, ",")
 end
 
+-- The churchofjesuschrist.org study page for a resolved reference, e.g.
+-- ".../study/scriptures/bofm/alma/32?lang=eng&id=p21#p21" (the same URL
+-- form providers/lds.lua parses, verse ids highlighted on the page), or
+-- nil if the book has no slug there. A chapter range links its first
+-- chapter.
+local function studyUrl(parsed)
+    local slug
+    for book_slug, name in pairs(BOOK_DATA[parsed.volume] or {}) do
+        if name == parsed.book then slug = book_slug break end
+    end
+    if not slug then return nil end
+    local url = T("https://www.churchofjesuschrist.org/study/scriptures/%1/%2/%3?lang=eng",
+        parsed.volume, slug, parsed.chapter)
+    local verses = parsed.verses or (parsed.verse and { parsed.verse })
+    if verses then
+        local ids = formatRangeLabel(verses):gsub("%d+", "p%0")
+        url = url .. "&id=" .. ids .. "#p" .. verses[1]
+    end
+    return url
+end
+
+-- Opens `url` the way a tapped external link would: KOReader's link
+-- dialog (open in browser, copy, QR code, ...) when a book is open, else
+-- straight in the browser where the device has one.
+local function openExternalLink(url)
+    local ui = require("apps/reader/readerui").instance
+    if ui and ui.link then
+        ui.link:onGoToExternalLink(url)
+    elseif Device:canOpenLink() then
+        Device:openLink(url)
+    else
+        UIManager:show(InfoMessage:new{ text = url })
+    end
+end
+
+-- Makes a TextViewer's title tappable, calling `callback` on tap. Its
+-- TitleBar has no tap hook of its own, so the title text is wrapped in an
+-- InputContainer; children get gestures before the TextViewer itself, so
+-- this wins over its own tap-outside-to-close handling.
+local function makeTitleTappable(textviewer, callback)
+    local titlebar = textviewer.titlebar
+    local group = titlebar and titlebar.inner_title_group
+    if not group then return end
+    for i, widget in ipairs(group) do
+        if widget == titlebar.title_widget then
+            local wrapper
+            wrapper = InputContainer:new{
+                widget,
+                ges_events = {
+                    TapScriptureTitle = {
+                        GestureRange:new{
+                            ges = "tap",
+                            range = function() return wrapper.dimen or Geom:new{ w = 0, h = 0 } end,
+                        },
+                    },
+                },
+            }
+            function wrapper:onTapScriptureTitle()
+                callback()
+                return true
+            end
+            group[i] = wrapper
+            group:resetLayout()
+            return
+        end
+    end
+end
+
+-- Makes each verse's reference at the start of its paragraph in a
+-- TextViewer's text (laid out by previewText below) tappable, calling
+-- on_tap(i) for the i-th verse. Taps anywhere else keep scrolling the
+-- text as usual. The tapped spot is mapped to a character with the text
+-- widget's own getCharPosAtXY(); `label_ranges` are each reference's
+-- first/last character positions in that text.
+local function makeLabelsTappable(textviewer, label_ranges, on_tap)
+    local scroll_widget = textviewer.scroll_widget
+    local text_widget = scroll_widget and scroll_widget.text_widget
+    if not (text_widget and text_widget.getCharPosAtXY) then return end
+    local orig_tap = scroll_widget.onTapScrollText
+    scroll_widget.onTapScrollText = function(this, arg, ges)
+        local dimen = text_widget.dimen
+        if dimen and dimen.x and ges.pos:intersectWith(dimen) then
+            local charpos = text_widget:getCharPosAtXY(ges.pos.x - dimen.x, ges.pos.y - dimen.y)
+            for i, range in ipairs(label_ranges) do
+                -- getCharPosAtXY() gives the cursor position nearest the
+                -- tap, i.e. up to one past the last character tapped
+                if charpos >= range[1] and charpos <= range[2] + 1 then
+                    on_tap(i)
+                    return true
+                end
+            end
+        end
+        return orig_tap(this, arg, ges)
+    end
+end
+
+-- Lays out verses (ScriptureData's third return value) as the preview's
+-- text: one paragraph each, its reference in bold (Poor Text Formatting).
+-- Returns that text and each reference's {first, last} character
+-- positions in the text as displayed (formatting characters excluded).
+local function previewText(found)
+    local util = require("util")
+    local parts, ranges, pos = {}, {}, 1
+    for i, entry in ipairs(found) do
+        local label_len = #util.splitToChars(entry.label)
+        ranges[i] = { pos, pos + label_len - 1 }
+        table.insert(parts, TextBoxWidget.PTF_BOLD_START .. entry.label .. TextBoxWidget.PTF_BOLD_END
+            .. " " .. entry.text)
+        -- this paragraph, then the "\n\n" separator
+        pos = pos + label_len + 1 + #util.splitToChars(entry.text) + 2
+    end
+    return TextBoxWidget.PTF_HEADER .. table.concat(parts, "\n\n"), ranges
+end
+
 -- Computes an anchor rect near the current text selection's on-screen
 -- position, so the preview window can pop up right next to it instead of
 -- centered - independent of the user's own "highlight_dialog_position"
@@ -276,12 +451,12 @@ function ScriptureGoto:showScripturePreview(parsed, highlight)
     local chapters = not verses and (parsed.chapters or { parsed.chapter }) or nil
 
     local function displayText()
-        local text, err, label
+        local text, err, label, found
         if verses then
-            text, err = ScriptureData:getVerseText(parsed.volume, parsed.book, parsed.chapter, verses)
+            text, err, found = ScriptureData:getVerseText(parsed.volume, parsed.book, parsed.chapter, verses)
             label = parsed.chapter .. ":" .. formatRangeLabel(verses)
         else
-            text, err = ScriptureData:getChapterText(parsed.volume, parsed.book, chapters)
+            text, err, found = ScriptureData:getChapterText(parsed.volume, parsed.book, chapters)
             label = formatRangeLabel(chapters)
         end
         if not text then
@@ -292,14 +467,34 @@ function ScriptureGoto:showScripturePreview(parsed, highlight)
             return
         end
 
+        -- the title links to the verse on churchofjesuschrist.org, and so
+        -- does each verse's own reference in the text
+        local url = studyUrl(parsed)
+        local label_ranges
+        if url and found then
+            text, label_ranges = previewText(found)
+        end
         local textviewer
         textviewer = TextViewer:new{
-            title = T("%1 %2", parsed.book, label),
+            title = T("%1 %2", parsed.book, label) .. (url and " \u{2197}" or ""), -- ↗
             text = text,
             width = highlight and math.floor(Screen:getWidth() * 0.9) or nil,
             height = highlight and math.floor(Screen:getHeight() * 0.4) or nil,
             anchor = highlight and function() return getSelectionAnchor(highlight, textviewer) end or nil,
         }
+        if url then
+            makeTitleTappable(textviewer, function() openExternalLink(url) end)
+            if label_ranges then
+                makeLabelsTappable(textviewer, label_ranges, function(i)
+                    openExternalLink(studyUrl{
+                        volume = parsed.volume,
+                        book = parsed.book,
+                        chapter = found[i].chapter,
+                        verses = { found[i].verse },
+                    })
+                end)
+            end
+        end
         UIManager:show(textviewer)
     end
 
@@ -326,6 +521,27 @@ function ScriptureGoto:showScripturePreview(parsed, highlight)
                     end
                 end)
             end)
+        end,
+    })
+end
+
+local VOLUME_TITLES = {
+    ot = _("Old Testament"),
+    nt = _("New Testament"),
+    bofm = _("Book of Mormon"),
+    ["dc-testament"] = _("Doctrine and Covenants"),
+    pgp = _("Pearl of Great Price"),
+}
+
+-- Lets the user pick the EPUB to use for a scripture volume.
+function ScriptureGoto:chooseVolumeEpub(volume, on_chosen)
+    UIManager:show(PathChooser:new{
+        select_directory = false,
+        select_file = true,
+        path = self:getVolumeEpubSetting(volume) or G_reader_settings:readSetting("home_dir"),
+        onConfirm = function(new_path)
+            self:setVolumeEpubSetting(volume, new_path)
+            if on_chosen then on_chosen() end
         end,
     })
 end
@@ -387,15 +603,18 @@ function ScriptureGoto:getVersePatternCandidates(chapter, verse)
         table.insert(candidates, {
             search = "(?<![0-9])" .. verse .. "[^0-9]",
             validate = function(node_text)
-                return node_text:match("^%s*" .. verse .. "%f[%D]") ~= nil
+                -- not "21:27 ...", a chapter:verse marker whose verse is 27
+                local rest = node_text:match("^%s*" .. verse .. "(.*)$")
+                return rest ~= nil and not rest:find("^[%d:]")
             end,
         })
     end
+    -- Some editions run several verses together in one paragraph ("... the
+    -- world? 14:23 Jesus answered ..."), so this form can't be required to
+    -- start its paragraph. "chapter:verse" bounded by non-digits is
+    -- specific enough on its own.
     table.insert(candidates, {
         search = "(?<![0-9])" .. chapter .. ":" .. verse .. "[^0-9]",
-        validate = function(node_text)
-            return node_text:match("^%s*" .. chapter .. ":" .. verse .. "%f[%D]") ~= nil
-        end,
     })
     return candidates
 end
@@ -403,25 +622,34 @@ end
 function ScriptureGoto:handleScriptureLink(ui, parsed)
     local epub_path = self:getVolumeEpubSetting(parsed.volume)
     if not epub_path or lfs.attributes(epub_path, "mode") ~= "file" then
-        UIManager:show(InfoMessage:new{
-            text = T(_("No EPUB configured for scripture volume \"%1\".\nSet one in the Scripture Goto menu (More tools)."), parsed.volume),
+        UIManager:show(ConfirmBox:new{
+            text = T(_("No EPUB is set for scripture volume \"%1\". Choose one now?\n\n(You can change it later in More tools > Scripture Goto > Scripture EPUBs.)"), parsed.volume),
+            ok_text = _("Choose EPUB"),
+            ok_callback = function() self:chooseVolumeEpub(parsed.volume) end,
         })
         return true
     end
 
     local book_name = parsed.book
+    -- every verse to highlight on landing (a range or list), or nil to
+    -- just land on the chapter
+    local verses = parsed.verses or (parsed.verse and { parsed.verse }) or nil
 
     local function navigate(target_ui)
         UIManager:scheduleIn(0.1, function()
-            ScriptureGoto:jumpToChapterVerse(target_ui, book_name, parsed.chapter, parsed.verse)
+            ScriptureGoto:jumpToChapterVerse(target_ui, book_name, parsed.chapter, verses)
         end)
     end
 
     if ui.document and ui.document.file == epub_path then
         navigate(ui)
-    else
+    elseif ui.document then
         ui.link:addCurrentLocationToStack()
         ui:switchDocument(epub_path, nil, navigate)
+    else
+        -- from the file browser (e.g. its search), no document open yet
+        local ReaderUI = require("apps/reader/readerui")
+        ReaderUI:showReader(epub_path, nil, nil, nil, navigate)
     end
     return true
 end
@@ -515,20 +743,29 @@ function ScriptureGoto:findChapterStartXPointer(ui, chapter, upper_bound_entry)
     return nil
 end
 
+-- True if the character just before `xp` is a digit.
+function ScriptureGoto:followsDigit(ui, xp)
+    local doc = ui.document
+    local prev = doc:getPrevVisibleChar(xp)
+    if not prev then return false end
+    local text = doc:getTextFromXPointers(prev, xp)
+    return text ~= nil and text:find("%d%s*$") ~= nil
+end
+
 -- Best-effort verse search: look for the verse marker forward from wherever
 -- the document currently is (the chapter's start, in practice), but don't
 -- wander past next_entry (the next chapter, or - when falling back to a
 -- book-level TOC entry - the next book). Tries each candidate search in
 -- turn, checking every candidate hit position (there can be several false
 -- positives before the real one) until one both stays in range and
--- validates as a genuine verse start.
-function ScriptureGoto:searchAndJumpToVerse(ui, chapter, verse, next_entry)
+-- validates as a genuine verse start. Returns its xpointer, or nil.
+function ScriptureGoto:findVerseXPointer(ui, chapter, verse, next_entry)
     for _, candidate in ipairs(self:getVersePatternCandidates(chapter, verse)) do
         local ok, results = pcall(function()
             -- direction 0 = forward, 1 = backward (see readersearch.lua) -
             -- do NOT pass 1 here expecting "forward", that searches
             -- backward from the chapter start and never finds anything.
-            return ui.document:findText(candidate.search, 0, 0, false, ui.view.state.page, true, 20, 0)
+            return ui.document:findText(candidate.search, 0, 0, false, ui.view.state.page, true, MAX_VERSE_HITS, 0)
         end)
         if ok and results then
             for _, hit in ipairs(results) do
@@ -539,25 +776,127 @@ function ScriptureGoto:searchAndJumpToVerse(ui, chapter, verse, next_entry)
                         -- of range - stop trying this candidate
                         break
                     end
-                    local valid = true
-                    if candidate.validate then
+                    -- crengine's lookbehind does not reliably reject a match that
+                    -- starts inside a longer number ("1:32" inside "11:32")
+                    local valid = not self:followsDigit(ui, hit.start)
+                    if valid and candidate.validate then
                         local ok2, node_text = pcall(function()
                             return ui.document:getTextFromXPointer(hit.start)
                         end)
                         valid = ok2 and node_text and candidate.validate(node_text)
                     end
                     if valid then
-                        ui.rolling:onGotoXPointer(hit.start, hit.start)
-                        return
+                        return hit.start
                     end
                 end
             end
         end
         logger.dbg("ScriptureGoto: verse search found nothing for", candidate.search)
     end
+    return nil
 end
 
-function ScriptureGoto:jumpToChapterVerse(ui, book_name, chapter, verse)
+-- The end of the paragraph containing `xp`: verses are found by their own
+-- paragraph starting with the verse marker (see getVersePatternCandidates),
+-- so a verse runs to the end of that paragraph. Walks forward a word at a
+-- time until the text from `xp` would cross a paragraph break.
+function ScriptureGoto:findParagraphEnd(ui, xp)
+    local doc = ui.document
+    local para_end = doc:getNextVisibleWordEnd(xp)
+    if not para_end then return xp end
+    for _ = 1, 1000 do
+        local next_end = doc:getNextVisibleWordEnd(para_end)
+        if not next_end then break end
+        local text = doc:getTextFromXPointers(xp, next_end)
+        if not text or text:find("\n") then break end
+        para_end = next_end
+    end
+    -- word ends stop short of trailing punctuation ("life" of "life.")
+    for _ = 1, 4 do
+        local next_char = doc:getNextVisibleChar(para_end)
+        if not next_char then break end
+        local text = doc:getTextFromXPointers(xp, next_char)
+        if not text or text:find("[\n%s]$") or text:find("\n") then break end
+        para_end = next_char
+    end
+    return para_end
+end
+
+-- Marks the text from xp0 to xp1 with a highlight-style tint that is not a
+-- real selection (no menu, no gesture interference): a view module that
+-- repaints it on every page draw. It lasts as long as this document is
+-- open (the view is rebuilt on a document switch) and is replaced by the
+-- next jump.
+function ScriptureGoto:markVerses(ui, xp0, xp1)
+    local mark = ui.view.view_modules.scripturegoto_verses
+    if not mark then
+        mark = {
+            paintTo = function(this, bb, x, y)
+                if not this.xp0 then return end
+                local sboxes = this.ui.document:getScreenBoxesFromPositions(this.xp0, this.xp1, true)
+                for _, box in ipairs(sboxes or {}) do
+                    this.view:drawHighlightRect(bb, x, y, box, "lighten")
+                end
+            end,
+        }
+        ui.view:registerViewModule("scripturegoto_verses", mark)
+    end
+    mark.xp0, mark.xp1 = xp0, xp1
+    UIManager:setDirty(ui.dialog, "ui")
+end
+
+-- The last visible character before `xp` (the start of the verse after the
+-- cited ones), skipping back over whitespace.
+function ScriptureGoto:findVerseEnd(ui, xp)
+    local doc = ui.document
+    local cur = xp
+    for _ = 1, 8 do
+        cur = doc:getPrevVisibleChar(cur)
+        if not cur then return nil end
+        local text = doc:getTextFromXPointers(cur, xp)
+        if text and text:find("%S") then return cur end
+    end
+    return nil
+end
+
+-- Jumps to the first of `verses` (a list, e.g. {7} or {11,12,13,14}) and
+-- marks everything from it to the end of the last one, so the reader sees
+-- the whole cited passage rather than just where it starts. A list with
+-- gaps ("12-14,16-17") marks the full span.
+function ScriptureGoto:searchAndJumpToVerse(ui, chapter, verses, next_entry)
+    local first, last = verses[1], verses[#verses]
+    local start_xp = self:findVerseXPointer(ui, chapter, first, next_entry)
+    if not start_xp then return end
+    ui.rolling:onGotoXPointer(start_xp, start_xp)
+
+    -- the cited verses end where the next verse starts (editions differ on
+    -- whether verses are paragraphs of their own), else at their paragraph's end
+    local end_xp
+    local after_xp = self:findVerseXPointer(ui, chapter, last + 1, next_entry)
+        or self:findVerseXPointer(ui, chapter + 1, 1, next_entry) -- last verse of the chapter
+    if after_xp and ui.document:compareXPointers(start_xp, after_xp) > 0 then
+        end_xp = self:findVerseEnd(ui, after_xp)
+    end
+    if not end_xp then
+        local last_xp = start_xp
+        if last ~= first then
+            last_xp = self:findVerseXPointer(ui, chapter, last, next_entry) or start_xp
+        end
+        local ok, para_end = pcall(self.findParagraphEnd, self, ui, last_xp)
+        end_xp = ok and para_end or nil
+        -- some editions pack a whole book into one paragraph; never run past the next entry
+        if end_xp and next_entry and ui.document:compareXPointers(end_xp, next_entry.xpointer) <= 0 then
+            end_xp = self:findVerseEnd(ui, next_entry.xpointer)
+        end
+    end
+    if end_xp then
+        self:markVerses(ui, start_xp, end_xp)
+    end
+end
+
+-- `verses` is a list of verse numbers ({7}, {11,12,13,14}, ...), or nil to
+-- land on the chapter itself.
+function ScriptureGoto:jumpToChapterVerse(ui, book_name, chapter, verses)
     if not (ui.rolling and ui.toc) then
         UIManager:show(InfoMessage:new{ text = _("Scripture Goto: target document isn't a reflowable EPUB.") })
         return
@@ -566,9 +905,9 @@ function ScriptureGoto:jumpToChapterVerse(ui, book_name, chapter, verse)
     local entry, next_entry = self:findChapterTocEntry(ui, book_name, chapter)
     if entry then
         ui:handleEvent(Event:new("GotoXPointer", entry.xpointer))
-        if not verse then return end
+        if not verses then return end
         UIManager:scheduleIn(0.2, function()
-            self:searchAndJumpToVerse(ui, chapter, verse, next_entry)
+            self:searchAndJumpToVerse(ui, chapter, verses, next_entry)
         end)
         return
     end
@@ -586,9 +925,9 @@ function ScriptureGoto:jumpToChapterVerse(ui, book_name, chapter, verse)
     ui:handleEvent(Event:new("GotoXPointer", book_entry.xpointer))
 
     if chapter == 1 then
-        if not verse then return end
+        if not verses then return end
         UIManager:scheduleIn(0.2, function()
-            self:searchAndJumpToVerse(ui, chapter, verse, book_next_entry)
+            self:searchAndJumpToVerse(ui, chapter, verses, book_next_entry)
         end)
         return
     end
@@ -602,9 +941,9 @@ function ScriptureGoto:jumpToChapterVerse(ui, book_name, chapter, verse)
             return
         end
         ui.rolling:onGotoXPointer(chapter_xp, chapter_xp)
-        if not verse then return end
+        if not verses then return end
         UIManager:scheduleIn(0.2, function()
-            self:searchAndJumpToVerse(ui, chapter, verse, book_next_entry)
+            self:searchAndJumpToVerse(ui, chapter, verses, book_next_entry)
         end)
     end)
 end
@@ -641,6 +980,336 @@ function ScriptureGoto:onScriptureGotoTestLink()
     dialog:onShowKeyboard()
 end
 
+-- Android maps a Bluetooth keyboard's Backspace to the "Del" key, which
+-- InputText treats as a forward delete (nothing happens at the end of the
+-- text). Make it delete backwards there.
+local BackspaceInputText = InputText:extend{}
+
+function BackspaceInputText:onKeyPress(key)
+    if Device:isAndroid() and self.focused and key["Del"]
+            and not key["Ctrl"] and not key["Shift"] and not key["Alt"] then
+        self:delChar()
+        return true
+    end
+    return InputText.onKeyPress(self, key)
+end
+
+-- "Search scriptures" input dialog. A query with a number in it is first
+-- tried as a Gospel Library-style reference shortcut ("ne37", "alma
+-- 32:21"); anything else (or a shortcut matching nothing) goes straight
+-- to full-text word search.
+function ScriptureGoto:onScriptureGotoSearch()
+    local dialog
+    dialog = InputDialog:new{
+        title = _("Search scriptures"),
+        inputtext_class = BackspaceInputText,
+        description = _("Words to find (verses containing all of them), or a reference shortcut like \"ne37\" or \"alma 32:21\"."),
+        input = self.last_search_query,
+        input_type = "text",
+        buttons = {{
+            {
+                text = _("Cancel"),
+                id = "close",
+                callback = function() UIManager:close(dialog) end,
+            },
+            {
+                text = _("Search"),
+                is_enter_default = true,
+                callback = function()
+                    local query = dialog:getInputText():gsub("^%s+", ""):gsub("%s+$", "")
+                    if query == "" then return end
+                    UIManager:close(dialog)
+                    self.last_search_query = query
+                    self:searchScriptures(query)
+                end,
+            },
+        }},
+    }
+    UIManager:show(dialog)
+    dialog:onShowKeyboard()
+    return true
+end
+
+function ScriptureGoto:searchScriptures(query)
+    local refs = query:find("%d") and ShortcutReference.search(query)
+    if refs and #refs > 0 then
+        self:showShortcutResults(query, refs)
+    else
+        self:fullTextSearch(query)
+    end
+end
+
+-- True if "Go to scripture" can jump to `parsed` (an EPUB is configured
+-- for its volume and still there).
+function ScriptureGoto:canJumpTo(parsed)
+    local epub_path = self:getVolumeEpubSetting(parsed.volume)
+    return epub_path ~= nil and lfs.attributes(epub_path, "mode") == "file"
+end
+
+-- A full-screen results list: tap jumps to a result if an EPUB is
+-- configured for its volume (closing the list), otherwise previews it on
+-- top of the list, which is still there once the preview is closed; hold
+-- always previews. `extra` is merged into the Menu's own options.
+function ScriptureGoto:showResultsMenu(title, subtitle, items, extra)
+    local menu
+    local options = {
+        title = title,
+        subtitle = subtitle,
+        item_table = items,
+        covers_fullscreen = true,
+        is_borderless = true,
+        is_popout = false,
+        title_bar_fm_style = true,
+        onMenuChoice = function(_menu_self, item)
+            if item.full_text_query then
+                UIManager:close(menu)
+                self:fullTextSearch(item.full_text_query)
+            elseif self:canJumpTo(item.parsed) then
+                UIManager:close(menu)
+                self:handleScriptureLink(self.ui, item.parsed)
+            else
+                self:showScripturePreview(item.parsed)
+            end
+        end,
+        onMenuHold = function(_menu_self, item)
+            if item.parsed then
+                self:showScripturePreview(item.parsed)
+            end
+            return true
+        end,
+    }
+    for k, v in pairs(extra or {}) do options[k] = v end
+    menu = Menu:new(options)
+    UIManager:show(menu)
+end
+
+function ScriptureGoto:showShortcutResults(query, refs)
+    local items = {{
+        text = T(_("Find \"%1\" in scriptures"), query),
+        full_text_query = query,
+    }}
+    for _, parsed in ipairs(refs) do
+        table.insert(items, {
+            text = parsed.label,
+            mandatory = parsed.volume_title,
+            parsed = parsed,
+        })
+    end
+    self:showResultsMenu(_("Search scriptures"), query, items)
+end
+
+-- Full-text search needs every volume downloaded and the index built;
+-- does whichever of those is still missing (asking first before the
+-- download), then shows the results.
+function ScriptureGoto:fullTextSearch(query)
+    local missing = SearchIndex:missingVolumes()
+    if #missing > 0 then
+        UIManager:show(ConfirmBox:new{
+            text = _("Searching the scripture text needs all five volumes downloaded first (one-time download, about 10 MB). Download now?"),
+            ok_text = _("Download"),
+            ok_callback = function()
+                self:downloadVolumes(missing, function()
+                    self:fullTextSearch(query)
+                end)
+            end,
+        })
+        return
+    end
+
+    if SearchIndex:isBuilt() then
+        self:showFullTextResults(query)
+        return
+    end
+
+    Trapper:wrap(function()
+        local info = InfoMessage:new{ text = _("Building search index (one-time, may take a minute)…") }
+        UIManager:show(info)
+        UIManager:forceRePaint()
+        local completed, ok, err = Trapper:dismissableRunInSubprocess(function()
+            return SearchIndex:build()
+        end, info)
+        UIManager:close(info)
+        if not completed then return end
+        if ok then
+            self:showFullTextResults(query)
+        else
+            UIManager:show(InfoMessage:new{
+                text = T(_("Couldn't build the search index: %1"), tostring(err)),
+            })
+        end
+    end)
+end
+
+-- Downloads each of `volumes` in turn, then calls on_done() if all of
+-- them succeeded.
+function ScriptureGoto:downloadVolumes(volumes, on_done)
+    local msg = InfoMessage:new{ text = _("Downloading scripture text…") }
+    UIManager:show(msg)
+    local i = 0
+    local function nextVolume()
+        i = i + 1
+        if i > #volumes then
+            UIManager:close(msg)
+            on_done()
+            return
+        end
+        UIManager:scheduleIn(0.1, function()
+            ScriptureData:download(volumes[i], function(ok, err)
+                if ok then
+                    nextVolume()
+                else
+                    UIManager:close(msg)
+                    UIManager:show(InfoMessage:new{
+                        text = T(_("Download failed: %1"), tostring(err)),
+                    })
+                end
+            end)
+        end)
+    end
+    nextVolume()
+end
+
+-- Bolds every word of `text` that's one of the searched words, using
+-- TextBoxWidget's Poor Text Formatting.
+local function boldSearchWords(text, words)
+    local wanted = {}
+    for _, word in ipairs(words) do wanted[word] = true end
+    return (text:gsub("%a[%a']*", function(word)
+        if wanted[SearchIndex.tokenize(word)[1]] then
+            return TextBoxWidget.PTF_BOLD_START .. word .. TextBoxWidget.PTF_BOLD_END
+        end
+    end))
+end
+
+function ScriptureGoto:showFullTextResults(query)
+    local found, err = SearchIndex:search(query, MAX_SEARCH_RESULTS)
+    if not found then
+        UIManager:show(InfoMessage:new{ text = T(_("Search failed: %1"), tostring(err)) })
+        return
+    end
+    if found.total == 0 then
+        UIManager:show(InfoMessage:new{ text = T(_("No verses contain \"%1\"."), query) })
+        return
+    end
+
+    local items = {}
+    for _, verse in ipairs(found.results) do
+        local label = T("%1 %2:%3", verse.book, verse.chapter, verse.verse)
+        verse.label = label
+        table.insert(items, {
+            text = TextBoxWidget.PTF_HEADER
+                .. TextBoxWidget.PTF_BOLD_START .. label .. TextBoxWidget.PTF_BOLD_END
+                .. "  " .. boldSearchWords(verse.text, found.words),
+            parsed = verse,
+        })
+    end
+    local subtitle
+    if found.total > #items then
+        subtitle = T(_("\"%1\": first %2 of %3 verses"), query, #items, found.total)
+    else
+        subtitle = T(_("\"%1\": %2 verses"), query, found.total)
+    end
+    self:showResultsMenu(_("Search scriptures"), subtitle, items, {
+        items_max_lines = 4,
+        multilines_forced = true, -- so the bold markup is always rendered
+    })
+end
+
+-- Offers to install a newer version if the update server has one (see
+-- updater.lua for how updates are verified).
+function ScriptureGoto:checkForUpdates()
+    -- Kobos keep Wi-Fi off when idle; bring it up first.
+    NetworkMgr:runWhenConnected(function()
+        self:_doCheckForUpdates()
+    end)
+end
+
+-- loadfile(), not require(): require() caches modules by name for the whole
+-- process, and another plugin may ship its own "updater" module.
+function ScriptureGoto:_loadUpdater()
+    local chunk = assert(loadfile(self.path .. "/updater.lua"))
+    return chunk()
+end
+
+function ScriptureGoto:_doCheckForUpdates()
+    local Updater = self:_loadUpdater()
+
+    local checking = InfoMessage:new{ text = _("Checking for updates…") }
+    UIManager:show(checking)
+    UIManager:forceRePaint()
+    local manifest, err = Updater:checkForUpdate(self.path)
+    UIManager:close(checking)
+
+    if not manifest then
+        UIManager:show(InfoMessage:new{
+            text = T(_("Update check failed: %1"), tostring(err)),
+        })
+        return
+    end
+
+    if not manifest.is_newer then
+        UIManager:show(InfoMessage:new{
+            text = T(_("Already up to date (version %1)."), manifest.current_version),
+        })
+        return
+    end
+
+    local notes = manifest.notes and manifest.notes ~= "" and ("\n\n" .. manifest.notes) or ""
+    UIManager:show(ConfirmBox:new{
+        text = T(_("Update available.\nInstalled: %1\nAvailable: %2"), manifest.current_version, manifest.version)
+            .. notes .. "\n\n" .. _("Download and install now? KOReader will need to restart afterward to use it."),
+        ok_text = _("Download"),
+        ok_callback = function()
+            self:_downloadAndInstallUpdate(manifest)
+        end,
+    })
+end
+
+function ScriptureGoto:_downloadAndInstallUpdate(manifest)
+    local Updater = self:_loadUpdater()
+    local stage_text = {
+        downloading = _("Downloading update…"),
+        verifying = _("Verifying update…"),
+        extracting = _("Extracting update…"),
+        installing = _("Installing update…"),
+    }
+
+    local status_msg = InfoMessage:new{ text = stage_text.downloading }
+    UIManager:show(status_msg)
+    UIManager:forceRePaint()
+
+    local ok, err = Updater:downloadAndInstall(self.path, manifest, function(stage)
+        UIManager:close(status_msg)
+        status_msg = InfoMessage:new{ text = stage_text[stage] or _("Updating…") }
+        UIManager:show(status_msg)
+        UIManager:forceRePaint()
+    end)
+    UIManager:close(status_msg)
+
+    if not ok then
+        UIManager:show(InfoMessage:new{
+            text = T(_("Update failed: %1"), tostring(err)),
+        })
+        return
+    end
+
+    if not Device:canRestart() then
+        -- e.g. Android, where "restarting" would just close the app
+        UIManager:show(InfoMessage:new{
+            text = _("Update installed. Close and reopen KOReader to use it."),
+        })
+        return
+    end
+    UIManager:show(ConfirmBox:new{
+        text = _("Update installed. Restart KOReader now to use it?"),
+        ok_text = _("Restart"),
+        ok_callback = function()
+            UIManager:restartKOReader()
+        end,
+        cancel_text = _("Later"),
+    })
+end
+
 function ScriptureGoto:onShowAbout()
     UIManager:show(TextViewer:new{
         title = _("About Scripture Goto"),
@@ -648,7 +1317,9 @@ function ScriptureGoto:onShowAbout()
 
 "Go to scripture" jumps to the matching chapter/verse in a scripture EPUB you configure per volume.
 
-"Preview scripture" shows the verse text in a floating window without needing an EPUB. That text comes from the bcbooks/scriptures-json project (LDS scriptures in JSON):
+"Search scriptures" finds a reference from a Gospel Library-style shortcut (e.g. "ne37" for 1 Nephi 3:7), or every verse containing the words you type.
+
+"Preview scripture" (and full-text search) shows the verse text without needing an EPUB. That text comes from the bcbooks/scriptures-json project (LDS scriptures in JSON):
 
 https://github.com/bcbooks/scriptures-json
 
@@ -657,29 +1328,58 @@ downloaded on first use and cached locally. Many thanks to that project for maki
 end
 
 function ScriptureGoto:addToMainMenu(menu_items)
-    local sub_item_table = {}
+    -- Search lives in the Search tab (one tap from the top menu, in the
+    -- reader and the file browser alike), next to the built-in searches;
+    -- the rest is set-up and lives under More tools.
+    menu_items.scripturegoto_search = {
+        text = _("Search scriptures…"),
+        sorting_hint = "search",
+        callback = function() self:onScriptureGotoSearch() end,
+    }
+
+    -- One entry per volume, in a submenu of its own: this is set-up you do
+    -- once, and would otherwise be most of the menu.
+    local epub_items = {}
     for _i, volume in ipairs{ "ot", "nt", "bofm", "dc-testament", "pgp" } do
-        table.insert(sub_item_table, {
+        table.insert(epub_items, {
             text_func = function()
                 local path = self:getVolumeEpubSetting(volume)
-                return T(_("Set EPUB for \"%1\": %2"), volume, path and ffiUtil.basename(path) or _("(none)"))
+                return T(_("%1: %2"), VOLUME_TITLES[volume], path and ffiUtil.basename(path) or _("(none)"))
             end,
-            callback = function()
-                UIManager:show(PathChooser:new{
-                    select_directory = false,
-                    select_file = true,
-                    path = self:getVolumeEpubSetting(volume) or G_reader_settings:readSetting("home_dir"),
-                    onConfirm = function(new_path)
-                        self:setVolumeEpubSetting(volume, new_path)
-                    end,
-                })
+            keep_menu_open = true,
+            callback = function(touchmenu)
+                self:chooseVolumeEpub(volume, function()
+                    if touchmenu then touchmenu:updateItems() end
+                end)
             end,
         })
     end
-    table.insert(sub_item_table, {
-        text = _("Open test link…"),
-        callback = function() self:onScriptureGotoTestLink() end,
-    })
+    local sub_item_table = {
+        {
+            text = _("Scripture EPUBs"),
+            sub_item_table = epub_items,
+        },
+    }
+    -- Only builds that ship with an update server can update themselves;
+    -- on others the item would be a dead end.
+    if lfs.attributes(self.path .. "/update-server.txt", "mode") == "file" then
+        table.insert(sub_item_table, {
+            text_func = function()
+                local f = io.open(self.path .. "/VERSION", "r")
+                local version = f and f:read("*l")
+                if f then f:close() end
+                return version and T(_("Check for updates (installed: %1)"), version) or _("Check for updates")
+            end,
+            callback = function() self:checkForUpdates() end,
+        })
+    end
+    -- A paste-a-URL tester for development (run-test.sh sets this).
+    if os.getenv("SCRIPTUREGOTO_DEV") then
+        table.insert(sub_item_table, {
+            text = _("Open test link…"),
+            callback = function() self:onScriptureGotoTestLink() end,
+        })
+    end
     table.insert(sub_item_table, {
         text = _("About Scripture Goto…"),
         callback = function() self:onShowAbout() end,
